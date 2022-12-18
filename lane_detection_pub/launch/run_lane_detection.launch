@@ -1,0 +1,10 @@
+<launch>
+    <arg name="config_path" default="$(find lane_detection)/config/run_lane_detection.yaml" />
+    <arg name="csv_save_path" default="$(find lane_detection)/output/pos.csv" />
+
+    <!-- run_slam node -->
+    <node pkg="lane_detection" name="lane_detection" type="lane_detection" output="screen"
+        args="-c $(arg config_path) -o $(arg csv_save_path)" >
+
+    </node>
+</launch>
