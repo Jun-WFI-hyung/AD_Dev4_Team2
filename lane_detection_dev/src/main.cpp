@@ -12,6 +12,11 @@ int main(int argc, char **argv)
     int window_width = 120;
     int thres = 100;
     int sobel_diff_thres = 110;
-
+    ros::init(argc, argv, "lane_detection",ros::init_options::AnonymousName);
+    ros::Rate rate(50);
+        while(ros::ok()){
+            ros::spin();
+            rate.sleep();
+        }
     return 0;
 }
