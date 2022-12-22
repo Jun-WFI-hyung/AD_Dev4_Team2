@@ -1,5 +1,5 @@
 <launch>
-    <node name="lane_detection_1221_3" pkg="lane_detection_1221_3" type="lane_detection_1221_3" output="screen"/>
+    <node name="lane_detection_1222_5" pkg="lane_detection_1222_5" type="lane_detection_1222_5" output="screen"/>
     
 
     <!-- usb_cam -->

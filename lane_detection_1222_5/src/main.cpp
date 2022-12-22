@@ -2,9 +2,18 @@
 
 cv::Mat frame_;
 std::tuple<float,float,float> poses;
+//std::tuple<float,float> poses;
+const float PI = 3.14159265358979;
+float gap = 60.F;
+float x_start = 340.F;
+float y_start = 340.F;
+float y_pose = 400.F;
+double multi = 180/PI;
+float theta_r_last = 140.F;
+float theta_l_last = 35.F;
 
-unsigned int gap = 30;
-float multi = 180/M_PI;
+
+
 class Drive
 {
 private:
@@ -39,7 +48,7 @@ pair<int,int> Drive::calc_order(float theta, float l_pos, float r_pos, float roi
         theta_ = angle;
     } else {        
         float center_diff = 50 * (lane_center - x_center) / 320;
-        theta_ = cvRound(((90 - theta) * 2.5f + center_diff) / 2);
+        theta_ = cvRound(((90 - theta) * 2.5f + center_diff*2) / 3);
 
         // steering
         angle = abs(theta_) < 50 ? theta_ : (theta_ < 0) ? -50 : 50;
@@ -100,7 +109,59 @@ Drive::~Drive()
 {
 }
 
+class MovingAverageFilter  {
+public:
+  // Construct a new Moving Average Filter object
+  MovingAverageFilter(int sample_size);
+  // Add new data to filter
+  void addSample(float new_sample);
+  // Get filtered data
+  float getWeightedMovingAverage();
+  // Get filtered data
+  float getMovingAverage();
 
+private:
+  const int kSampleSize_;
+  std::deque<float> samples_;
+  std::vector<float> weight_;
+};
+
+MovingAverageFilter::MovingAverageFilter(int sample_size)
+    : kSampleSize_(sample_size) {
+  weight_.reserve(kSampleSize_);
+  for (uint8_t i = 1; i <= kSampleSize_; ++i) {
+    weight_.push_back(i);
+  }
+}
+
+void MovingAverageFilter::addSample(float new_sample) {
+  samples_.push_back(new_sample);
+  if (samples_.size() > kSampleSize_) {
+    samples_.pop_front();
+  }
+}
+
+float MovingAverageFilter::getMovingAverage() {
+  float sum = 0;
+  int sample_size = samples_.size();
+  for (uint8_t i = 0; i < sample_size; i++) {
+    sum += samples_[i];
+  }
+  return sum / (float)sample_size;
+}
+
+float MovingAverageFilter::getWeightedMovingAverage() {
+  float sum = 0;
+  float weight_sum = 0;
+  for (uint8_t i = 0; i < samples_.size(); i++) {
+    sum += samples_[i] * weight_[i];
+    weight_sum += weight_[i];
+  }
+  if (weight_sum == 0) {
+   throw std::runtime_error("Weight sum is zero");
+  }
+  return (float)sum / weight_sum;
+}
 
 cv::Mat get_roi(cv::Mat& img,int x,int x_g,int y,int y_g){
     return img(cv::Range(x, x_g), cv::Range(y, y_g));
@@ -115,7 +176,7 @@ void hist_stretch(Mat& img){
 	}
 
 	int gmin, gmax;
-	int ratio = img.cols * img.rows * 0.01;
+	int ratio = img.cols * img.rows * 0.02;
 
 	for (int i = 0, s = 0; i <= 255; i++) {
 		s += hist[i];
@@ -138,6 +199,8 @@ struct SLine{
     cv::Vec3f params;
     int nums_valid_points;
 };
+
+
 
 cv::Vec3f total_least_squares(std::vector<cv::Point>& points,std::vector<int> pt_on_Line){
     float x = 0, y = 0, x2 = 0, y2 = 0, xy = 0, w = 0;
@@ -171,11 +234,43 @@ cv::Vec3f total_least_squares(std::vector<cv::Point>& points,std::vector<int> pt
     
     return line;
 }
+Mat img_retouch(Mat& img, int thres1, int thres2)
+{
+    vector<Mat> img_vec;
+    split(img, img_vec);
+
+    Mat b = img_vec[0];
+    Mat g = img_vec[1];
+    Mat r = img_vec[2];
+
+    Mat dst;
+    for (int r = 0; r < img_vec[0].rows; r++) {
+        uchar* ptr_b = img_vec[0].ptr<uchar>(r);
+        uchar* ptr_g = img_vec[1].ptr<uchar>(r);
+        uchar* ptr_r = img_vec[2].ptr<uchar>(r);
+        uchar* ptr_dst = dst.ptr<uchar>(r);
+
+        for (int c = 0; c < img_vec[0].cols; c++) {
+            if (ptr_b[c] > thres1 || ptr_g[c] > thres1 || ptr_r[c] > thres1) {
+                ptr_b[c] = 255;
+                ptr_g[c] = 255;
+                ptr_r[c] = 255;
+            } else if (abs(ptr_b[c] - ptr_g[c]) > thres2 || abs(ptr_b[c] - ptr_r[c]) > thres2 || abs(ptr_g[c] - ptr_r[c]) > thres2) {
+                ptr_b[c] = 255;
+                ptr_g[c] = 255;
+                ptr_r[c] = 255;
+            }
+        }
+    }
+
+    merge(img_vec, dst);
+    //imshow("dst",dst);
+    
+    return dst;
+}
 
 SLine RANSAC_Line(float t,float p,float e,int T,std::vector<cv::Point>& points){
-    //int s = 2;
-    //int N = (int)ceilf(log(1-p)/log(1 - pow(1-e, s)));
-    int N = 5;
+    int N = 20;
     std::vector<SLine> line_candidates;
     std::vector<int> pt_on_line(points.size());
     RNG rng((uint64)-1);
@@ -239,44 +334,45 @@ SLine RANSAC_Line(float t,float p,float e,int T,std::vector<cv::Point>& points){
     }
 }
 
+//MovingAverageFilter left_filter (5);
+//MovingAverageFilter right_filter (5);
+
 std::tuple<float,float,float> binary_3part(){
 	TickMeter tm;
     tm.start();
-    Mat dx;
+    Mat dx,dy;
     Mat sobel_img = frame_.clone();
     Mat show = frame_.clone();
     
-    cvtColor(sobel_img,sobel_img,COLOR_BGR2GRAY);
     hist_stretch(sobel_img);
-    
+    // imshow("hist_stretch",sobel_img);
     //double alpha = 1.0f;
     //int m = (int)mean(sobel_img)[0];
     //sobel_img = sobel_img + (sobel_img - m) * alpha;
+    GaussianBlur(sobel_img, sobel_img, Size(), 2.);
+    sobel_img = img_retouch(sobel_img, 140, 50);
     
-    GaussianBlur(sobel_img, sobel_img, Size(), 3.);
-	
+    cvtColor(sobel_img,sobel_img,COLOR_BGR2GRAY);
+    //imshow("GaussianBlur",sobel_img);
     vector<Point> left,right;
     Point minloc, maxloc;
     double minv, maxv;
-    //threshold(sobel_img,sobel_img,200,255,THRESH_BINARY);
     Sobel(sobel_img, dx, CV_32F, 1, 0);
-    erode(dx,dx,Mat());
-    Mat left_roi = get_roi(dx,360,390,0,300);
-    Mat right_roi = get_roi(dx,360,390,320,600);
-    
+    //imshow("Sobel",dx);
+    Mat left_roi = get_roi(dx,y_start,410,0,300);
+    Mat right_roi = get_roi(dx,y_start,410,x_start,600);
     
     for(int i = 0;i<gap;i++){
     	minMaxLoc(left_roi.row(i), &minv, &maxv, &minloc, &maxloc);
-    	//if(abs(maxv)>100){
-        	left.push_back(Point(maxloc.x, i+360));
-        //}
+    	//std::cout << "Max" << maxv << endl;
+        	left.push_back(Point(maxloc.x, i+y_start));
         minMaxLoc(right_roi.row(i), &minv, &maxv, &minloc, &maxloc);
-        std::cout << minv << std::endl;
-        if(abs(minv)>20){
-        	right.push_back(Point(minloc.x+320, i+360));
-        }
+        	//std::cout << "Min" << minv << endl;
+		if(minloc.x==0 && minv==0){
+			minloc.x = x_start;
+		}
+		right.push_back(Point(minloc.x+x_start, i+y_start));
     }
-
     for (Point pt : left) {
         circle(show, pt, 2, Scalar(255,0,0), -1);
     }
@@ -294,31 +390,48 @@ std::tuple<float,float,float> binary_3part(){
     
     SLine result_l, result_r; 
     if(!left.empty()){
-        result_l = RANSAC_Line(1.,0.5,0.5,1,left);
-        theta_l = result_l.params[0];
+        result_l = RANSAC_Line(1.,0.5,0.5,20,left);
+        //theta_l = result_l.params[0];
         m1 = tan(result_l.params[0]);
         x1 = result_l.params[1];
         y1 = result_l.params[2];
         x0_l =(0-y1)/m1 +x1;
         x480_l = (480-y1)/m1 +x1;
-        lpos = (380-y1)/m1 +x1;
-        line(show,Point(x0_l,0),Point(x480_l,480),Scalar(0,0,255));
+        lpos = (y_pose-y1)/m1 +x1;
+        theta_l = abs(atan2(-480,x0_l-x480_l)*multi);
+       
+        
+        if(theta_l>90.F){
+        	theta_l = theta_l_last;
+        }else{
+        	theta_l_last = theta_l;
+        }
+        
     }else{
     	
         result_l = SLine();
         lpos = 0;
     }
-    //std::cout << result_l.nums_valid_points << std::endl;
+    cout << "Left_theta: " << theta_l << endl;
+    line(show,Point(x0_l,0),Point(x480_l,480),Scalar(0,0,255));
     if(!right.empty()){
-        result_r = RANSAC_Line(1.,0.5,0.5,1,right);
-        theta_r = result_r.params[0];
+        result_r = RANSAC_Line(1.,0.5,0.5,20,right);
+        //theta_r = result_r.params[0];
         m2 = tan(result_r.params[0]);
         x2 = result_r.params[1];
         y2 = result_r.params[2];
         x0_r =(0-y2)/m2 +x2;
-        x480_r = (480-y2)/m2 +x2;
-        rpos = (380-y2)/m2 +x2;
+        x480_r = (480-y2)/m2 +x2;	
+        rpos = (y_pose-y2)/m2 +x2;
+        theta_r = abs(atan2(-480,x0_r-x480_r)*multi);
+        cout << "theta_r_last: " << theta_r_last << endl;
+        if(theta_r<90.F){
+        	theta_r = theta_r_last;
+        }else{
+        	theta_r_last = theta_r;
+        }
         line(show,Point(x0_r,0),Point(x480_r,480),Scalar(0,0,255));
+        cout << "Right_theta: " << theta_r << endl;
     }else{
     	result_r = SLine();
         rpos = 640;
@@ -329,35 +442,35 @@ std::tuple<float,float,float> binary_3part(){
     if(result_l.nums_valid_points!=0 && result_r.nums_valid_points!=0){
     	x_center = (m1*x1-m2*x2-y1+y2)/(m1-m2);
     	y_center = ((m1*m2*(x2-x1))+m2*y1-m1*y2)/(m2-m1);
+    	//std::cout << x_center << " " << y_center << std::endl;
     	if((x_center==320.F)){
     		theta = 90.F;
-    		//std::cout << theta << std::endl;
-    		//std::cout << theta*180/M_PI << std::endl;
     	}else{
-    		theta  =(float) atan2(320-x_center,380-y_center )*multi+90;
     		
-    		//std::cout << theta*180/M_PI+90 << std::endl;
+    		theta  = abs(atan2(y_center-y_pose,x_center-320 ))*multi;
     	}
     	
     }else if(result_l.nums_valid_points!=0 && result_r.nums_valid_points==0){
     	rpos = 640;
-    	theta = theta_l*multi+90;
-    	//std::cout << theta*180/M_PI+90 << std::endl;
+    	theta = theta_l;
+    	cout <<"right: " <<theta << endl;
     }else if(result_l.nums_valid_points==0 && result_r.nums_valid_points!=0){
     	lpos = 0;
-    	theta = theta_r*multi+90;
-    	//std::cout << theta*180/M_PI+90 << std::endl;
+    	theta = theta_r;
+    	 cout <<"left: " <<theta << endl;
     }else{
     	theta = -1;
     }
-    //circle(show, Point(x_center,y_center), 2, Scalar(255,0,0));
+    circle(show, Point(x_center,y_center), 5, Scalar(255,0,0));
     
     //imshow("left_roi",left_roi);
     //imshow("right_roi",right_roi);
-    imshow("show",show);
+    //std::cout <<"theta: " <<theta << std::endl;
+    //imshow("show",show);
+    
     waitKey(1);
-    //std::cout << lpos << " " << rpos<< " " <<theta << std::endl;
     tm.stop();
+    //cout << "Theta: " << theta << endl;
     //cout << "TIME: " << tm.getTimeMilli() << endl;
     return {lpos,rpos,theta};
     
@@ -370,23 +483,26 @@ void imageCallback(const sensor_msgs::Image& msg){
     
 }
 
-void controll(ros::Publisher &pub, int angle,int speed ){
-    xycar_msgs::xycar_motor msg;
+//  void controll(ros::Publisher &pub, int angle,int speed ){
+//      xycar_msgs::xycar_motor msg;
     
-    msg.angle = angle;
-    msg.speed = speed;
+//      msg.angle = angle;
+//      msg.speed = speed;
     
-    pub.publish(msg);
-}
+//      pub.publish(msg);
+//  }
 
 int main(int argc, char **argv) {
+//std::cout << "?????????????" << std::endl;
     float steer_angle = 1;
     ros::init(argc, argv, "test");      
     ros::NodeHandle nh;                  
-    ros::Publisher pub = nh.advertise<xycar_msgs::xycar_motor>("xycar_motor", 10);
+    // ros::Publisher pub = nh.advertise<xycar_msgs::xycar_motor>("xycar_motor", 10);
     ros::Subscriber sub = nh.subscribe("/usb_cam/image_raw/", 1, imageCallback);
-    Drive drive(10,10,0.5,0.00012,0.21);
+    Drive drive(5,15,0.5,0.00012,0.21);
     ros::Rate rate(50);
+    //Edge sim;
+    
     while(ros::ok()){
     	
     	//if(sub.getNumPublishers() > 0){
@@ -394,12 +510,15 @@ int main(int argc, char **argv) {
     	if (frame_.empty()) {
       		continue;
     	}
+    		//sim.Img2Canny(frame_);
+    		//sim.PointMake();
+    		//poses = sim.PointCheck();
+    		//float theta = sim.ThetaMake();
         	poses = binary_3part();
-        	
-        	//auto speed_angle = drive.calc_order(get<2>(poses),get<0>(poses),get<1>(poses),640,380);
-        	//std::cout << "angle" << speed_angle.second << "speed" <<speed_angle.first << endl;
-        	//controll(pub, speed_angle.second,speed_angle.first);
-        	
+        	// auto speed_angle = drive.calc_order(get<2>(poses),get<0>(poses),get<1>(poses),640,y_pose);
+        	//auto speed_angle = drive.calc_order(theta,get<0>(poses),get<1>(poses),640,y_pose);
+        	// controll(pub, speed_angle.second,speed_angle.first);
+        	//waitKey(1);
         
     	rate.sleep();
     }

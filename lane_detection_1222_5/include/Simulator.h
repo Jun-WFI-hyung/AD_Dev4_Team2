@@ -3,7 +3,7 @@
 
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
-#include <xycar_msgs/xycar_motor.h>
+//#include <xycar_msgs/xycar_motor.h>
 #include <sensor_msgs/Image.h>
 
 #include <fstream>
