@@ -17,11 +17,129 @@ void img_warp(Mat& img, Mat& flat_img, Mat& pers_mtx, Mat& flat_mtx, vector<Poin
 void img_filter(Mat& img, Mat& bin_img, Size k_size, double t_thres, int r_thres);
 void hist_stretch(Mat& img);
 void window_detect(Mat& img, int w_height, int w_width, int w_num);
-Mat img_retouch(Mat& img, int thres);
+Mat img_retouch(Mat& img, int thres1, int thres2);
 void sobel_test(Mat& img);
 
 
+class Drive
+{
+private:
+    float max_speed;
+    float speed;
+    int angle;
+    int stop_counter;
+    float kp_, ki_, kd_;
+    float p_error, i_error, d_error;
 
+public:
+    pair<int,int> calc_order(float theta, float l_pos, float r_pos, float roi_x_value, float roi_y_value);
+    float pid_control(float err);
+    Drive(float init_speed, float max_spd, float kp, float ki, float kd);
+    ~Drive();
+};
+
+
+pair<int,int> Drive::calc_order(float theta, float l_pos, float r_pos, float roi_x_value, float roi_y_value)
+{
+    float x_center = roi_x_value / 2;
+    float y_center = roi_y_value / 2;
+    float lane_center = (l_pos + r_pos) / 2;
+
+    // first = speed, second = angle
+    pair<int,int> order(speed, 0);
+    int theta_;
+
+    if (theta < 0) {
+        theta_ = angle;
+    } else {        
+        float center_diff = 50 * (lane_center - x_center) / 320;
+        theta_ = cvRound((90 - theta) * 2.5f + center_diff);
+
+        // steering
+        angle = abs(theta_) < 50 ? theta_ : (theta_ < 0) ? -50 : 50;
+        order.second = angle;
+    }    
+
+    // accel - break
+    float break_press = 0;
+    if (abs(order.second) > 15) {
+        break_press = (order.second - 15) / 35;
+    } else {
+        break_press = -1;
+    }
+
+    speed = (speed - break_press < 1) ? 1 : (speed - break_press > max_speed) ? max_speed : speed - break_press;
+
+    order.first = cvRound(speed);
+    //printf("\r speed : %f    //    angle : %f", speed, theta_);
+    return order;
+}
+
+float Drive::pid_control(float err)
+{
+    d_error = err - p_error;
+    p_error = err;
+    i_error += err;
+
+    return kp_ * p_error + ki_ * i_error + kd_ * d_error;
+}
+
+// 0.4 / 0.00012 / 0.19
+Drive::Drive(float init_speed, float max_spd, float kp, float ki, float kd)
+{
+    max_speed = max_spd;
+    speed = init_speed;
+    angle = 0;
+    stop_counter = 0;
+
+    p_error = 0.0;
+    i_error = 0.0;
+    d_error = 0.0;
+
+    kp_ = kp;
+    ki_ = ki;
+    kd_ = kd;
+}
+
+Drive::~Drive()
+{
+}
+
+
+
+
+
+# if 0
+
+#define LIDAR_TOPIC "/scan"
+#define CAM_TOPIC "/usb_cam/image_raw"
+
+
+CvImagePtr bridge;
+
+void callback(const sensor_msgs::Image& img) 
+{
+    bridge = toCvCopy(img, "bgr8");
+}
+
+int main(int argc, char **argv) 
+{
+    
+    init(argc, argv, "driver");
+    NodeHandle nh;
+    //Rate rate(30);
+    Subscriber sub = nh.subscribe(CAM_TOPIC, 1, callback);
+
+    while (ok()) {   
+        Mat image = bridge -> image;
+        while (image.empty()) { break; }
+
+        spinOnce();
+
+    return 0;
+}
+
+# else
 
 int main(int argc, char **argv) 
 {
@@ -78,7 +196,7 @@ int main(int argc, char **argv)
         hist_stretch(image);
         //imshow("img", image);
         GaussianBlur(image, image, Size(5, 5), 2);
-        filt_img = img_retouch(image, 135);
+        filt_img = img_retouch(image, 155, 50);
 
         img_warp(filt_img, flat_img, pers_mtx, flat_mtx, pts_draw, pts_pers, flat_size);
         img_filter(flat_img, bin_img, k_size, t_thres, r_thres);
@@ -104,8 +222,8 @@ int main(int argc, char **argv)
         cvtColor(bin_img, bin_img, CV_GRAY2BGR);
         imshow("flat", flat_img);
         imshow("bin", bin_img); */
-        //cvtColor(canny_img, canny_img, CV_GRAY2BGR);
-        //imshow("canny", canny_img);
+        //cvtColor(filt_img, filt_img, CV_GRAY2BGR);
+        imshow("filt_img", filt_img);
         if (waitKey(10) == 27) break;        
     }
 
@@ -184,13 +302,20 @@ void hist_stretch(Mat& img)
 	img = (img - gmin) * 255 / (gmax - gmin);
 }
 
-
-Mat img_retouch(Mat& img, int thres)
+void window_detect(Mat& img, int w_height, int w_width, int w_num)
 {
-    TickMeter tm;
-    vector<Mat> img_vec;
+    // flat image //
+    Mat flat_img = img.clone();
+    Rect win_rect(Point(0, 0), Point(flat_img.cols -1, flat_img.rows - 1));
+    Mat win = flat_img(win_rect).clone();
+    threshold(win, win, 65, 255, THRESH_BINARY);
+    cvtColor(win, win, CV_GRAY2BGR);
+    //imshow("flat", win);
+}
 
-    tm.start();
+Mat img_retouch(Mat& img, int thres1, int thres2)
+{
+    vector<Mat> img_vec;
     split(img, img_vec);
 
     Mat b = img_vec[0];
@@ -205,32 +330,20 @@ Mat img_retouch(Mat& img, int thres)
         uchar* ptr_dst = dst.ptr<uchar>(r);
 
         for (int c = 0; c < img_vec[0].cols; c++) {
-            if (ptr_b[c] > thres || ptr_g[c] > thres || ptr_r[c] > thres) {
+            if (ptr_b[c] > thres1 || ptr_g[c] > thres1 || ptr_r[c] > thres1) {
                 ptr_b[c] = 255;
                 ptr_g[c] = 255;
                 ptr_r[c] = 255;
-            };
+            } else if (abs(ptr_b[c] - ptr_g[c]) > thres2 || abs(ptr_b[c] - ptr_r[c]) > thres2 || abs(ptr_g[c] - ptr_r[c]) > thres2) {
+                ptr_b[c] = 255;
+                ptr_g[c] = 255;
+                ptr_r[c] = 255;
+            }
         }
     }
 
     merge(img_vec, dst);
-    tm.stop(); 
-
-    putText(
-            dst, 
-            format("elapsed : %f", tm.getTimeMilli()),
-            Point(10, 20),
-            FONT_HERSHEY_SIMPLEX, 
-            0.5, 
-            Scalar(255, 255, 0), 
-            1.5, 
-            LINE_AA
-            );
-
-    tm.reset();
-    imshow("dst", dst);
-
-    sobel_test(dst);
+    //sobel_test(dst);
     return dst;
 }
 
