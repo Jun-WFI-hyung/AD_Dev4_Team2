@@ -8,8 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   # xycar_msgs
 )
 
-#find_package (OpenCV 4 REQUIRED)
-find_package(OpenCV 4.5.5 REQUIRED PATHS ~/OpenCV4/install/lib/cmake/opencv4)
+find_package (OpenCV 4 REQUIRED)
+#find_package(OpenCV 4.5.5 REQUIRED PATHS ~/OpenCV4/install/lib/cmake/opencv4)
 
 catkin_package(
   INCLUDE_DIRS include
