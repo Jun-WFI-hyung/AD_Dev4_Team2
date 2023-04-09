@@ -1,5 +1,5 @@
 ### in 4th Autonomous Driving Devcourse (22.12.19 ~ 12.23)</br>
-- 김준형 : vision정보 품질개선
-- 박진 : Hough Transform
-- 이세웅 : RANSAC
-- 정지훈 : Obstacle Avoidance
+- Kim Jun hyung : Improvement of Sensor Quality & Control
+- Park Jin : Hough Transform Lane Detection
+- Lee Se woong : Brightness based Lane Detection with RANSAC & sobel filter
+- Jung Isaac : Obstacle Avoidance with LIDAR
